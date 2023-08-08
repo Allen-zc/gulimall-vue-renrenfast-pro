@@ -7,6 +7,9 @@
       show-checkbox
       node-key="catId"
       :default-expanded-keys="expandedKey"
+      draggable
+      :allow-drop="allowDrop"
+      @node-drop="handleDrop"
     >
       <span class="custom-tree-node" slot-scope="{ node, data }">
         <span>{{ node.label }}</span>
@@ -36,7 +39,12 @@
       </span>
     </el-tree>
 
-    <el-dialog :title="title" :visible.sync="dialogVisible" width="30%">
+    <el-dialog
+      :title="title"
+      :visible.sync="dialogVisible"
+      width="30%"
+      :close-on-click-modal="false"
+    >
       <el-form :model="category">
         <el-form-item label="分类名称">
           <el-input v-model="category.name" autocomplete="off"></el-input>
@@ -69,6 +77,8 @@ export default {
   props: {},
   data() {
     return {
+      updateNodes: [],
+      maxLevel: 0,
       title: "",
       dialogType: "", //edit //add
       category: {
@@ -106,6 +116,107 @@ export default {
       });
     },
 
+    handleDrop(draggingNode, dropNode, dropType, ev) {
+      console.log("tree drop: ", dropNode.label, dropType);
+      //1. 当前节点最新的父节点id
+      let pCid = 0;
+      let siblings = null;
+      if (dropType == "before" || dropType == "after") {
+        pCid =
+          dropNode.parent.data.catId == undefined
+            ? 0
+            : dropNode.parent.data.catId;
+        siblings = dropNode.parent.childNodes;
+      } else {
+        pCid = dropNode.data.catId;
+        siblings = dropNode.childNodes;
+      }
+
+      //2. 当前拖拽的节点的最新排序
+      for (let i = 0; i < siblings.length; i++) {
+        if (siblings[i].data.catId == draggingNode.data.catId) {
+          //如果遍历的是当前正在拖拽的节点
+          let catLevel = draggingNode.level;
+          if (siblings[i].level != draggingNode.level) {
+            //当前节点的层级发生变换
+            catLevel = siblings[i].level;
+            //修改子节点层级
+            this.updateChildNodeLevel(siblings[i]);
+          }
+          this.updateNodes.push({
+            catId: siblings[i].data.catId,
+            sort: i,
+            parentCid: pCid,
+            catLevel: catLevel,
+          });
+        } else {
+          this.updateNodes.push({ catId: siblings[i].data.catId, sort: i });
+        }
+      }
+
+      //3. 当前拖拽的节点的最新层级 updateNodes
+      console.log("updateNodes:", this.updateNodes);
+      this.$http({
+        url: this.$http.adornUrl("/product/category/update/sort"),
+        method: "post",
+        data: this.$http.adornData(this.updateNodes, false),
+      }).then(({ data }) => {
+        this.$message({
+          message: "菜单顺序等修改成功",
+          type: "success",
+        });
+         // 刷新菜单数据
+        // 刷新出新的菜单
+        this.getMenus();
+        // 设置需要默认展开的菜单
+        this.expandedKey = [pCid];
+      });
+    },
+
+    updateChildNodeLevel(node) {
+      if (node.childNodes.length > 0) {
+        for (let i = 0; i < node.childNodes.length; i++) {
+          var cNode = node.childNodes[i].data;
+          this.updateNodes.push({
+            catId: cNode.catId,
+            catLevel: node.childNodes[i].level,
+          });
+          this.updateChildNodeLevel(node.childNodes[i]);
+        }
+      }
+    },
+
+    allowDrop(draggingNode, dropNode, type) {
+      //被拖动的当前节点以及所在的父节点总层数不能大于3
+
+      //1 被拖动的当前节点总层数
+      console.log("allowDrop:", draggingNode, dropNode, type);
+      //统计当前被拖动的总层数
+      this.coutNodeLevel(draggingNode.data);
+      //当前正在拖动的节点+父节点所在的深度不大于3即可
+      let deep = this.maxLevel - draggingNode.data.catLevel + 1;
+      console.log("深度：", deep);
+
+      // this.maxLevel
+      if (type == "inner") {
+        return deep + dropNode.level <= 3;
+      } else {
+        return deep + dropNode.parent.level <= 3;
+      }
+    },
+
+    coutNodeLevel(node) {
+      //递归找到所有子节点，求出最大深度
+      if (node.children != null && node.children.length > 0) {
+        for (let i = 0; i < node.children.length; i++) {
+          if (node.children[i].catLevel > this.maxLevel) {
+            this.maxLevel = node.children[i].catLevel;
+          }
+          this.coutNodeLevel(node.children[i]);
+        }
+      }
+    },
+
     edit(data) {
       console.log("要修改的数据", data);
       this.dialogType = "edit";
@@ -118,9 +229,15 @@ export default {
         method: "get",
       }).then(({ data }) => {
         // 请求成功
-        console.log("要回显的数据",data)
+        console.log("要回显的数据", data.data);
         this.category.name = data.data.name;
         this.category.catId = data.data.catId;
+        this.category.icon = data.data.icon;
+        this.category.productUnit = data.data.productUnit;
+        this.category.parentCid = data.data.parentCid;
+        this.category.catLevel = data.data.catLevel;
+        this.category.sort = data.data.sort;
+        this.category.showStatus = data.data.showStatus;
       });
     },
 
@@ -131,6 +248,13 @@ export default {
       this.dialogVisible = true;
       this.category.parentCid = data.catId;
       this.category.catLevel = data.catLevel * 1 + 1;
+
+      this.category.catId = null;
+      this.category.name = "";
+      this.category.icon = "";
+      this.category.productUnit = "";
+      this.category.sort = 0;
+      this.category.showStatus = 1;
     },
 
     submitData() {
@@ -143,7 +267,27 @@ export default {
     },
 
     // 修改三级分类数据
-    editCategory() {},
+    editCategory() {
+      var { catId, name, icon, productUnit } = this.category;
+      // 发送请求获取当前节点最新的数据
+      this.$http({
+        url: this.$http.adornUrl(`/product/category/update`),
+        method: "post",
+        data: this.$http.adornData({ catId, name, icon, productUnit }, false),
+      }).then(({ data }) => {
+        this.$message({
+          message: "菜单修改成功",
+          type: "success",
+        });
+        // 关闭对话框
+        this.dialogVisible = false;
+        // 刷新菜单数据
+        // 刷新出新的菜单
+        this.getMenus();
+        // 设置需要默认展开的菜单
+        this.expandedKey = [this.category.parentCid];
+      });
+    },
 
     // 添加三级分类 的方法
     addCategory() {
